@@ -5,7 +5,9 @@ An LLM-powered social media post generator that creates brand-aligned content ba
 ## Features
 
 - 🎯 **Brand-Aligned Content**: Uses your company's brand voice, values, and messaging
-- 📱 **Multi-Platform Support**: Generates posts optimized for Twitter, Instagram, LinkedIn, and Facebook
+- 📱 **Multi-Platform Support**: Generates posts optimized for Mastodon, Twitter, Instagram, LinkedIn, and Facebook
+- 🤖 **OpenRouter Integration**: Uses OpenRouter API for flexible LLM model selection
+- 📮 **Mastodon Posting**: Direct posting to Mastodon instances
 - 🎨 **Customizable**: Control topic, tone, length, and hashtags
 - 🔄 **Batch Generation**: Generate multiple variations at once
 - 💡 **Smart Prompts**: Built-in prompts that incorporate your brand identity
@@ -18,23 +20,24 @@ An LLM-powered social media post generator that creates brand-aligned content ba
 pip install -r requirements.txt
 ```
 
-### 2. Set Up OpenAI API Key
+### 2. Set Up Environment Variables
 
-You'll need an OpenAI API key. Get one from [OpenAI Platform](https://platform.openai.com/api-keys).
+Create a `.env` file in the project root with your API keys:
 
-**Option A: Environment Variable (Recommended)**
 ```bash
-export OPENAI_API_KEY='your-api-key-here'
+# OpenRouter API Key
+OPEN_ROUTER_API=your-openrouter-api-key-here
+
+# Mastodon Access Token (optional, for direct posting)
+MASTODON_ACCESS_TOKEN=your-mastodon-access-token-here
+
+# Mastodon Instance URL (optional, if not included in token)
+MASTODON_INSTANCE_URL=https://mastodon.social
 ```
 
-**Option B: Create `.env` file**
-```bash
-cp .env.example .env
-# Then edit .env and add your API key
-```
-
-**Option C: Pass via command line**
-Use the `--api-key` flag when running the script.
+**Getting your API keys:**
+- **OpenRouter API Key**: Get one from [OpenRouter](https://openrouter.ai/keys)
+- **Mastodon Access Token**: Create an app in your Mastodon instance settings (Settings > Development > New Application)
 
 ## Usage
 
@@ -43,20 +46,23 @@ Use the `--api-key` flag when running the script.
 The easiest way to generate posts is using the CLI tool:
 
 ```bash
+# Generate a Mastodon post (preview only)
+python generate.py --platform mastodon
+
+# Generate and post to Mastodon
+python generate.py --platform mastodon --post
+
+# Generate 3 Mastodon posts about community
+python generate.py --platform mastodon --topic "community" --count 3
+
 # Generate a Twitter post
-python generate.py --platform twitter
+python generate.py --platform twitter --length short
 
-# Generate an Instagram post about community
-python generate.py --platform instagram --topic "community"
-
-# Generate 3 LinkedIn posts
-python generate.py --platform linkedin --count 3
-
-# Generate a long-form LinkedIn post
-python generate.py --platform linkedin --length long
+# Generate and post to Mastodon with custom visibility
+python generate.py --platform mastodon --post --visibility unlisted
 
 # Generate without hashtags
-python generate.py --platform twitter --no-hashtags
+python generate.py --platform mastodon --no-hashtags
 
 # Custom topic and tone
 python generate.py --platform instagram --topic "product launch" --tone "excited but authentic"
@@ -69,26 +75,38 @@ You can also use the generator programmatically:
 ```python
 from post_generator import SocialMediaPostGenerator
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Initialize generator
 generator = SocialMediaPostGenerator(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    model="gpt-4o-mini"  # or "gpt-4" for better quality
+    api_key=os.getenv("OPEN_ROUTER_API"),
+    model="openai/gpt-4o-mini"  # or "anthropic/claude-3-haiku", etc.
 )
 
 # Generate a single post
 post = generator.generate_post(
-    platform="twitter",
+    platform="mastodon",
     topic="community trust",
     length="medium",
     include_hashtags=True
 )
 print(post)
 
+# Generate and post to Mastodon
+result = generator.generate_and_post(
+    platform="mastodon",
+    topic="product discovery",
+    post_to_mastodon=True,
+    visibility="public"
+)
+print(f"Posted: {result.get('mastodon_url')}")
+
 # Generate multiple variations
 posts = generator.generate_multiple_posts(
     count=3,
-    platform="instagram",
+    platform="mastodon",
     topic="product discovery"
 )
 for post in posts:
@@ -107,17 +125,21 @@ This will generate example posts for different platforms.
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--platform` | Platform: twitter, instagram, linkedin, facebook | twitter |
+| `--platform` | Platform: mastodon, twitter, instagram, linkedin, facebook | mastodon |
 | `--topic` | Specific topic to focus on | None |
 | `--tone` | Tone override | Brand voice |
 | `--length` | Post length: short, medium, long | medium |
 | `--count` | Number of posts to generate | 1 |
 | `--no-hashtags` | Don't include hashtags | False |
-| `--api-key` | OpenAI API key | Uses env var |
-| `--model` | OpenAI model to use | gpt-4o-mini |
+| `--api-key` | OpenRouter API key | Uses OPEN_ROUTER_API env var |
+| `--model` | OpenRouter model (format: provider/model) | openai/gpt-4o-mini |
+| `--post` | Post to Mastodon | False |
+| `--visibility` | Mastodon visibility: public, unlisted, private, direct | public |
+| `--mastodon-instance` | Mastodon instance URL | Uses MASTODON_INSTANCE_URL env var |
 
 ## Platform-Specific Details
 
+- **Mastodon**: 500 character limit (typical), community-focused
 - **Twitter**: 280 character limit, concise and punchy
 - **Instagram**: Up to 2200 characters, can include hashtags
 - **LinkedIn**: Up to 3000 characters, professional tone
@@ -148,11 +170,17 @@ Edit `brand_context.py` to reflect changes in your Notion docs. The file contain
 
 Modify the `_build_prompt()` method in `post_generator.py` to customize how prompts are constructed.
 
-### Using Different Models
+### Using Different Models via OpenRouter
 
-- `gpt-4o-mini`: Fast and cost-effective (default)
-- `gpt-4o`: Better quality, slightly more expensive
-- `gpt-4`: Highest quality, most expensive
+OpenRouter supports many models. Specify them in format `provider/model`:
+
+- `openai/gpt-4o-mini`: Fast and cost-effective (default)
+- `openai/gpt-4o`: Better quality
+- `anthropic/claude-3-haiku`: Fast Claude model
+- `anthropic/claude-3-opus`: Highest quality Claude
+- `google/gemini-pro`: Google's Gemini model
+
+Browse all available models at [OpenRouter Models](https://openrouter.ai/models).
 
 Change the model via `--model` flag or when initializing `SocialMediaPostGenerator`.
 
@@ -187,9 +215,15 @@ SocialMediaAgent/
 
 ## Troubleshooting
 
-### "OpenAI API key required" error
-- Make sure you've set `OPENAI_API_KEY` environment variable or passed `--api-key`
-- Verify your API key is valid at [OpenAI Platform](https://platform.openai.com/)
+### "OpenRouter API key required" error
+- Make sure you've set `OPEN_ROUTER_API` in your `.env` file or passed `--api-key`
+- Verify your API key is valid at [OpenRouter](https://openrouter.ai/)
+
+### Mastodon posting not working
+- Ensure `MASTODON_ACCESS_TOKEN` is set in your `.env` file
+- Verify your Mastodon instance URL is correct in `MASTODON_INSTANCE_URL`
+- Check that your access token has write permissions
+- Token format can be either just the token, or `instance_url:token`
 
 ### Posts don't match brand voice
 - Review and update `brand_context.py` with more specific brand guidelines
@@ -203,9 +237,10 @@ SocialMediaAgent/
 
 ## Cost Considerations
 
-- `gpt-4o-mini`: ~$0.15 per 1M input tokens, ~$0.60 per 1M output tokens
+OpenRouter pricing varies by model. Check current rates at [OpenRouter Pricing](https://openrouter.ai/models).
+- `openai/gpt-4o-mini`: Very cost-effective
 - Each post generation uses roughly 500-1000 tokens
-- Very cost-effective for regular use
+- OpenRouter provides transparent pricing per model
 
 ## Next Steps
 
