@@ -40,6 +40,12 @@ Examples:
 
   # Generate post without hashtags
   python generate.py --platform mastodon --no-hashtags
+
+  # Find and reply to recent posts about a keyword (preview replies)
+  python generate.py --find-and-reply "skincare"
+
+  # Find and automatically post replies
+  python generate.py --find-and-reply "skincare" --auto-post
         """
     )
 
@@ -117,6 +123,26 @@ Examples:
         help="Mastodon instance URL (or set MASTODON_INSTANCE_URL in .env)"
     )
 
+    parser.add_argument(
+        "--find-and-reply",
+        type=str,
+        metavar="KEYWORD",
+        help="Find recent posts about KEYWORD and generate replies (use with --auto-post to post them)"
+    )
+
+    parser.add_argument(
+        "--auto-post",
+        action="store_true",
+        help="Automatically post replies (only used with --find-and-reply)"
+    )
+
+    parser.add_argument(
+        "--reply-limit",
+        type=int,
+        default=5,
+        help="Number of posts to find and reply to (default: 5, only used with --find-and-reply)"
+    )
+
     args = parser.parse_args()
 
     # Check for API key
@@ -131,6 +157,12 @@ Examples:
         print("Warning: --post specified but MASTODON_ACCESS_TOKEN not set.", file=sys.stderr)
         print("Post will be generated but not posted.", file=sys.stderr)
 
+    # Check if find-and-reply mode
+    if args.find_and_reply:
+        if not os.getenv("MASTODON_ACCESS_TOKEN"):
+            print("Error: MASTODON_ACCESS_TOKEN required for --find-and-reply", file=sys.stderr)
+            sys.exit(1)
+
     try:
         # Initialize generator
         mastodon_token = os.getenv("MASTODON_ACCESS_TOKEN")
@@ -142,6 +174,59 @@ Examples:
             mastodon_token=mastodon_token,
             mastodon_instance=mastodon_instance
         )
+
+        # Handle find-and-reply mode
+        if args.find_and_reply:
+            if not generator.mastodon:
+                print("Error: Mastodon client not configured", file=sys.stderr)
+                sys.exit(1)
+
+            print(f"\n🔍 Finding and replying to posts about '{args.find_and_reply}'...")
+            result = generator.find_and_reply(
+                keyword=args.find_and_reply,
+                limit=args.reply_limit,
+                auto_post=args.auto_post
+            )
+
+            # Display results
+            print("\n" + "=" * 60)
+            print(f"Results for '{args.find_and_reply}'")
+            print("=" * 60)
+            print(f"Posts found: {result['posts_found']}")
+
+            if result['replies']:
+                print(f"\nGenerated {len(result['replies'])} replies:\n")
+                for i, (post, reply) in enumerate(zip(result['posts'], result['replies']), 1):
+                    author = post.get('account', {}).get('username', 'unknown')
+                    content = post.get('content', '')[:100].replace('<p>', '').replace('</p>', '')
+                    import re
+                    content = re.sub(r'<[^>]+>', '', content)
+
+                    print(f"--- Reply {i} ---")
+                    print(f"Original post by @{author}: {content}...")
+                    print(f"Reply: {reply['reply_text']}")
+                    if reply.get('should_reply'):
+                        print("Should reply: Yes")
+                    else:
+                        print(" Should reply: No (acknowledgment only)")
+                    print()
+
+                if args.auto_post:
+                    print("\n" + "=" * 60)
+                    print("Posting Results:")
+                    print("=" * 60)
+                    for posted in result['posted']:
+                        if posted.get('success'):
+                            print(f"Posted reply to post {posted['post_id']}: {posted.get('url', 'N/A')}")
+                        else:
+                            print(f"Failed to post reply to post {posted['post_id']}: {posted.get('error', 'Unknown error')}")
+                else:
+                    print("\n💡 Tip: Use --auto-post to automatically post these replies")
+                    print("   Or review them and post manually using the Mastodon API")
+            else:
+                print("\nNo replies generated.")
+
+            return
 
         # Generate and optionally post
         if args.count == 1:
