@@ -4,6 +4,8 @@ Generates brand-aligned social media posts based on company documentation.
 """
 
 import os
+import re
+import json
 import requests
 from typing import Optional, List, Dict
 from dotenv import load_dotenv
@@ -166,6 +168,105 @@ class MastodonClient:
             raise RuntimeError(f"Error posting to Mastodon: {str(e)}")
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Error posting to Mastodon: {str(e)}")
+
+    def search_posts(self, keyword: str, limit: int = 5) -> List[Dict]:
+        """
+        Search for posts on Mastodon by keyword.
+
+        Args:
+            keyword: Search keyword
+            limit: Maximum number of posts to return (default: 5)
+
+        Returns:
+            List of post dictionaries from Mastodon API
+        """
+        url = f"{self.instance_url.rstrip('/')}/api/v2/search"
+
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+
+        params = {
+            "q": keyword,
+            "type": "statuses",
+            "limit": limit,
+            "resolve": False  # Don't resolve remote statuses
+        }
+
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            result = response.json()
+
+            # Extract statuses from search results
+            statuses = result.get("statuses", [])
+            return statuses[:limit]
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Error searching Mastodon: {str(e)}")
+
+    def reply_to_status(self, status_id: str, reply_text: str, visibility: str = "public") -> Dict:
+        """
+        Reply to a Mastodon status.
+
+        Args:
+            status_id: ID of the status to reply to
+            reply_text: The reply text (max 500 chars)
+            visibility: Visibility level: public, unlisted, private, direct
+
+        Returns:
+            Response dictionary from Mastodon API
+        """
+        # Validate reply length
+        if len(reply_text) > 500:
+            raise ValueError(
+                f"Reply is too long ({len(reply_text)} characters). "
+                f"Mastodon replies are limited to 500 characters."
+            )
+
+        if not reply_text or not reply_text.strip():
+            raise ValueError("Reply content cannot be empty")
+
+        url = f"{self.instance_url.rstrip('/')}/api/v1/statuses"
+
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+
+        data = {
+            "status": reply_text,
+            "in_reply_to_id": status_id,
+            "visibility": visibility
+        }
+
+        try:
+            response = requests.post(url, headers=headers, json=data)
+
+            # If there's an error, try to extract the detailed error message
+            if not response.ok:
+                error_msg = f"HTTP {response.status_code}: {response.reason}"
+
+                try:
+                    error_data = response.json()
+                    if isinstance(error_data, dict):
+                        if "error" in error_data:
+                            error_msg += f"\nError: {error_data['error']}"
+                        if "error_description" in error_data:
+                            error_msg += f"\nDescription: {error_data['error_description']}"
+                        if "message" in error_data:
+                            error_msg += f"\nMessage: {error_data['message']}"
+                except (ValueError, KeyError):
+                    if response.text:
+                        error_msg += f"\nResponse: {response.text[:200]}"
+
+                raise requests.exceptions.HTTPError(error_msg, response=response)
+
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            raise RuntimeError(f"Error replying to Mastodon status: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Error replying to Mastodon status: {str(e)}")
 
 
 class SocialMediaPostGenerator:
@@ -507,6 +608,223 @@ Generate the post now:"""
             # Remove trailing ellipsis if we're at the limit
             if result.endswith('...') and len(result) > max_chars - 3:
                 result = result[:-3].rstrip()
+
+        return result
+
+    def generate_replies(
+        self,
+        posts: List[Dict],
+        keyword: str
+    ) -> List[Dict[str, str]]:
+        """
+        Generate replies for multiple posts using structured outputs.
+
+        Args:
+            posts: List of post dictionaries from Mastodon API
+            keyword: The keyword that was searched (for context)
+
+        Returns:
+            List of dictionaries with 'post_id', 'reply_text', and 'original_post' keys
+        """
+        if not posts:
+            return []
+
+        # Format posts for the prompt
+        posts_text = ""
+        for i, post in enumerate(posts, 1):
+            content = post.get("content", "").replace("<p>", "").replace("</p>", "").replace("<br>", "\n")
+            # Remove HTML tags (simple approach)
+            content = re.sub(r'<[^>]+>', '', content)
+            author = post.get("account", {}).get("username", "unknown")
+            post_id = post.get("id", "")
+            posts_text += f"\nPost {i} (ID: {post_id}):\n"
+            posts_text += f"Author: @{author}\n"
+            posts_text += f"Content: {content[:300]}\n"  # Limit content length
+            posts_text += "---\n"
+
+        prompt = f"""You are a social media engagement expert for a skincare discovery platform. Generate thoughtful, brand-aligned replies to Mastodon posts about "{keyword}".
+
+BRAND CONTEXT:
+{self.brand_context}
+
+POSTS TO REPLY TO:
+{posts_text}
+
+REQUIREMENTS:
+- Generate a reply for EACH post above
+- Replies should be helpful, authentic, and align with our brand voice (honest, friendly, informed)
+- Keep replies under 500 characters (Mastodon limit)
+- Be conversational and add value - don't just promote
+- If a post isn't relevant or you can't add value, write a brief, friendly acknowledgment
+- Replies should feel like advice from a smart, honest friend
+
+Return your responses as a JSON object with a "replies" key containing an array. Each reply object should have:
+- "post_id": the ID of the post (from the Post X section above)
+- "reply_text": your reply text (max 500 characters)
+- "should_reply": true if the reply adds value, false if it's just an acknowledgment
+
+Example format:
+{{
+  "replies": [
+    {{
+      "post_id": "123456",
+      "reply_text": "Your reply here...",
+      "should_reply": true
+    }}
+  ]
+}}
+
+Generate replies now:"""
+
+        try:
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "HTTP-Referer": "https://github.com/your-org/socialmedia-agent",
+                    "X-Title": "Social Media Agent",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are an expert social media engagement specialist. Always respond with valid JSON only, no additional text. Return a JSON object with a 'replies' array."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 2000,
+                    "response_format": {"type": "json_object"}  # Force JSON object output
+                }
+            )
+
+            response.raise_for_status()
+            result = response.json()
+            reply_text = result["choices"][0]["message"]["content"].strip()
+
+            # Parse JSON response
+            try:
+                # Try to extract JSON if wrapped in markdown code blocks
+                if "```json" in reply_text:
+                    reply_text = reply_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in reply_text:
+                    reply_text = reply_text.split("```")[1].split("```")[0].strip()
+
+                parsed = json.loads(reply_text)
+
+                # Handle both array and object with "replies" key
+                if isinstance(parsed, list):
+                    replies = parsed
+                elif isinstance(parsed, dict) and "replies" in parsed:
+                    replies = parsed["replies"]
+                elif isinstance(parsed, dict):
+                    # Single reply object
+                    replies = [parsed]
+                else:
+                    raise ValueError("Unexpected response format")
+
+                # Validate and clean replies
+                validated_replies = []
+                for reply in replies:
+                    if not isinstance(reply, dict):
+                        continue
+                    post_id = str(reply.get("post_id", ""))
+                    reply_text = reply.get("reply_text", "").strip()
+                    should_reply = reply.get("should_reply", True)
+
+                    if post_id and reply_text:
+                        # Truncate if needed
+                        if len(reply_text) > 500:
+                            reply_text = self._truncate_post_if_needed(reply_text, 500)
+
+                        validated_replies.append({
+                            "post_id": post_id,
+                            "reply_text": reply_text,
+                            "should_reply": should_reply
+                        })
+
+                return validated_replies
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Failed to parse JSON response from LLM: {str(e)}\nResponse: {reply_text[:500]}")
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Error generating replies via OpenRouter: {str(e)}")
+
+    def find_and_reply(
+        self,
+        keyword: str,
+        limit: int = 5,
+        auto_post: bool = False
+    ) -> Dict:
+        """
+        Find recent posts by keyword and generate replies for them.
+
+        Args:
+            keyword: Keyword to search for
+            limit: Number of posts to find and reply to (default: 5)
+            auto_post: If True, automatically post replies. If False, return replies for review.
+
+        Returns:
+            Dictionary with 'posts', 'replies', and 'posted' information
+        """
+        if not self.mastodon:
+            raise ValueError("Mastodon client not configured. Set MASTODON_ACCESS_TOKEN in .env")
+
+        # Search for posts
+        print(f"🔍 Searching for posts about '{keyword}'...")
+        posts = self.mastodon.search_posts(keyword, limit=limit)
+
+        if not posts:
+            return {
+                "keyword": keyword,
+                "posts_found": 0,
+                "posts": [],
+                "replies": [],
+                "posted": []
+            }
+
+        print(f"Found {len(posts)} posts")
+
+        # Generate replies using structured outputs
+        print(f"Generating replies...")
+        replies = self.generate_replies(posts, keyword)
+
+        # Match replies to posts
+        result = {
+            "keyword": keyword,
+            "posts_found": len(posts),
+            "posts": posts,
+            "replies": replies,
+            "posted": []
+        }
+
+        # Post replies if requested
+        if auto_post and replies:
+            print(f"📤 Posting {len(replies)} replies...")
+            for reply in replies:
+                if reply.get("should_reply", True):
+                    try:
+                        post_response = self.mastodon.reply_to_status(
+                            reply["post_id"],
+                            reply["reply_text"]
+                        )
+                        result["posted"].append({
+                            "post_id": reply["post_id"],
+                            "success": True,
+                            "url": post_response.get("url", "N/A")
+                        })
+                        print(f"Posted reply to post {reply['post_id']}")
+                    except Exception as e:
+                        result["posted"].append({
+                            "post_id": reply["post_id"],
+                            "success": False,
+                            "error": str(e)
+                        })
+                        print(f"Failed to post reply to post {reply['post_id']}: {e}")
 
         return result
 
