@@ -1,0 +1,15 @@
+[Unit]
+Description=Social Media Post Generator API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/socialmedia-agent
+Environment="PATH=/opt/socialmedia-agent/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/opt/socialmedia-agent/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

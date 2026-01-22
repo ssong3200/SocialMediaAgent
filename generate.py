@@ -143,6 +143,12 @@ Examples:
         help="Number of posts to find and reply to (default: 5, only used with --find-and-reply)"
     )
 
+    parser.add_argument(
+        "--include-image",
+        action="store_true",
+        help="Generate and attach an image to the post using Replicate"
+    )
+
     args = parser.parse_args()
 
     # Check for API key
@@ -168,11 +174,14 @@ Examples:
         mastodon_token = os.getenv("MASTODON_ACCESS_TOKEN")
         mastodon_instance = args.mastodon_instance or os.getenv("MASTODON_INSTANCE_URL")
 
+        replicate_token = os.getenv("REPLICATE_API_TOKEN")
+        
         generator = SocialMediaPostGenerator(
             api_key=api_key,
             model=args.model,
             mastodon_token=mastodon_token,
-            mastodon_instance=mastodon_instance
+            mastodon_instance=mastodon_instance,
+            replicate_token=replicate_token
         )
 
         # Handle find-and-reply mode
@@ -249,19 +258,38 @@ Examples:
             # If --post flag is set and Mastodon is configured, ask for confirmation
             if args.post and generator.mastodon:
                 print(f"\nVisibility: {args.visibility}")
+                if args.include_image:
+                    print("Image generation: Enabled")
                 print("\nDo you want to post this to Mastodon? (y/n): ", end="")
 
                 try:
                     confirmation = input().strip().lower()
                     if confirmation in ['y', 'yes']:
-                        # Post to Mastodon
+                        # Post to Mastodon (with optional image)
                         try:
-                            mastodon_response = generator.mastodon.post_status(
-                                post,
-                                visibility=args.visibility
-                            )
-                            print("\n✅ Posted to Mastodon!")
-                            print(f"URL: {mastodon_response.get('url', 'N/A')}")
+                            if args.include_image:
+                                # Use generate_and_post to include image
+                                result = generator.generate_and_post(
+                                    platform=args.platform,
+                                    topic=args.topic,
+                                    tone=args.tone,
+                                    length=args.length,
+                                    include_hashtags=not args.no_hashtags,
+                                    visibility=args.visibility,
+                                    post_to_mastodon=True,
+                                    include_image=True
+                                )
+                                print("\n✅ Posted to Mastodon!")
+                                if result.get("image"):
+                                    print(f"Image generated: {result['image'].get('url', 'N/A')}")
+                                print(f"URL: {result.get('mastodon_url', 'N/A')}")
+                            else:
+                                mastodon_response = generator.mastodon.post_status(
+                                    post,
+                                    visibility=args.visibility
+                                )
+                                print("\n✅ Posted to Mastodon!")
+                                print(f"URL: {mastodon_response.get('url', 'N/A')}")
                         except Exception as e:
                             print(f"\n❌ Failed to post: {e}")
                     else:

@@ -8,11 +8,183 @@ import re
 import json
 import requests
 from typing import Optional, List, Dict
+from pathlib import Path
 from dotenv import load_dotenv
 from brand_context import get_full_brand_context
 
 # Load environment variables
 load_dotenv()
+
+# Try to import replicate, but make it optional
+try:
+    import replicate
+    REPLICATE_AVAILABLE = True
+except ImportError:
+    REPLICATE_AVAILABLE = False
+    replicate = None
+
+
+class ImageGenerator:
+    """Generates images using Replicate API."""
+    
+    def __init__(self, replicate_token: Optional[str] = None):
+        """
+        Initialize image generator.
+        
+        Args:
+            replicate_token: Replicate API token. If None, will try to get from REPLICATE_API_TOKEN env var.
+        """
+        if not REPLICATE_AVAILABLE:
+            raise ValueError("Replicate package not installed. Install it with: pip install replicate")
+        
+        self.replicate_token = replicate_token or os.getenv("REPLICATE_API_TOKEN")
+        if not self.replicate_token:
+            raise ValueError(
+                "Replicate API token required. Set REPLICATE_API_TOKEN in .env file."
+            )
+        
+        # Set the token for replicate client
+        os.environ["REPLICATE_API_TOKEN"] = self.replicate_token
+        
+        # Model configuration
+        self.model = "sundai-club/sophiamodel22222:16ea4bbaba70b5afc5dbc3abe40a40c2b64a384be258b85d96ab68d7332121d6"
+    
+    def generate_image(
+        self,
+        prompt: str,
+        output_dir: Optional[str] = None,
+        model: str = "dev",
+        go_fast: bool = False,
+        lora_scale: float = 1.0,
+        megapixels: str = "1",
+        num_outputs: int = 1,
+        aspect_ratio: str = "1:1",
+        output_format: str = "webp",
+        guidance_scale: float = 3.0,
+        output_quality: int = 80,
+        prompt_strength: float = 0.8,
+        extra_lora_scale: float = 1.0,
+        num_inference_steps: int = 28
+    ) -> Dict:
+        """
+        Generate an image using Replicate.
+        
+        Args:
+            prompt: Text prompt for image generation
+            output_dir: Directory to save the image (optional). If None, saves to current directory.
+            model: Model variant to use (default: "dev")
+            go_fast: Whether to use fast generation mode
+            lora_scale: LoRA scale parameter
+            megapixels: Image resolution in megapixels
+            num_outputs: Number of images to generate
+            aspect_ratio: Aspect ratio (e.g., "1:1", "16:9")
+            output_format: Output format (webp, png, jpg)
+            guidance_scale: Guidance scale for generation
+            output_quality: Output quality (1-100)
+            prompt_strength: Prompt strength (0-1)
+            extra_lora_scale: Extra LoRA scale
+            num_inference_steps: Number of inference steps
+        
+        Returns:
+            Dictionary with 'url' (image URL) and 'path' (local file path if saved)
+        """
+        try:
+            # Build input dictionary
+            input_params = {
+                "model": model,
+                "go_fast": go_fast,
+                "lora_scale": lora_scale,
+                "megapixels": megapixels,
+                "num_outputs": num_outputs,
+                "aspect_ratio": aspect_ratio,
+                "output_format": output_format,
+                "guidance_scale": guidance_scale,
+                "output_quality": output_quality,
+                "prompt_strength": prompt_strength,
+                "prompt": prompt,
+                "extra_lora_scale": extra_lora_scale,
+                "num_inference_steps": num_inference_steps
+            }
+            
+            output = replicate.run(self.model, input=input_params)
+            
+            # Get the first output
+            if isinstance(output, list) and len(output) > 0:
+                image_output = output[0]
+            else:
+                image_output = output
+            
+            result = {
+                "url": image_output.url if hasattr(image_output, 'url') else str(image_output)
+            }
+            
+            # Save to disk if output_dir is provided
+            if output_dir:
+                output_path = Path(output_dir)
+                output_path.mkdir(parents=True, exist_ok=True)
+                
+                # Determine file extension from output_format
+                ext = output_format.lower()
+                if ext not in ['webp', 'png', 'jpg', 'jpeg']:
+                    ext = 'webp'
+                
+                # Generate filename
+                import time
+                filename = f"generated_image_{int(time.time())}.{ext}"
+                filepath = output_path / filename
+                
+                # Download and save the image
+                image_response = requests.get(result["url"])
+                image_response.raise_for_status()
+                
+                with open(filepath, "wb") as file:
+                    file.write(image_response.content)
+                
+                result["path"] = str(filepath)
+            
+            return result
+            
+        except Exception as e:
+            raise RuntimeError(f"Error generating image with Replicate: {str(e)}")
+    
+    def generate_image_for_post(
+        self,
+        post_text: str,
+        topic: Optional[str] = None,
+        output_dir: Optional[str] = None
+    ) -> Dict:
+        """
+        Generate an image that complements a social media post.
+        Creates a prompt based on the post content and brand context.
+        
+        Args:
+            post_text: The generated post text
+            topic: Optional topic to guide image generation
+            output_dir: Directory to save the image
+        
+        Returns:
+            Dictionary with image URL and path
+        """
+        # Create a visual prompt based on the post
+        # Extract key themes from the post
+        brand_context = get_full_brand_context()
+        
+        # Build image prompt - focus on skincare/beauty themes
+        # Remove hashtags and clean up the text for the prompt
+        clean_text = re.sub(r'#\w+', '', post_text).strip()
+        
+        # Build a descriptive image prompt
+        image_prompt = f"Beautiful, clean skincare product photography: {clean_text[:150]}"
+        if topic:
+            image_prompt += f", {topic}"
+        
+        # Add brand context for visual style
+        image_prompt += ". Style: clean, modern, warm, minimal but not sterile. Professional skincare and beauty product photography, soft natural lighting, elegant composition"
+        
+        return self.generate_image(
+            prompt=image_prompt,
+            output_dir=output_dir
+        )
 
 
 class MastodonClient:
@@ -103,13 +275,64 @@ class MastodonClient:
 
         return url
 
-    def post_status(self, status: str, visibility: str = "public") -> Dict:
+    def upload_media(self, file_path: str, description: Optional[str] = None) -> Dict:
+        """
+        Upload a media file to Mastodon.
+        
+        Args:
+            file_path: Path to the media file (image, video, etc.)
+            description: Optional alt text/description for the media
+        
+        Returns:
+            Dictionary with media ID and other metadata from Mastodon API
+        """
+        if not os.path.exists(file_path):
+            raise ValueError(f"Media file not found: {file_path}")
+        
+        url = f"{self.instance_url.rstrip('/')}/api/v1/media"
+        
+        headers = {
+            "Authorization": f"Bearer {self.access_token}"
+        }
+        
+        # Prepare multipart form data
+        with open(file_path, 'rb') as file:
+            files = {
+                'file': (os.path.basename(file_path), file, self._get_content_type(file_path))
+            }
+            data = {}
+            if description:
+                data['description'] = description
+            
+            try:
+                response = requests.post(url, headers=headers, files=files, data=data)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                raise RuntimeError(f"Error uploading media to Mastodon: {str(e)}")
+    
+    def _get_content_type(self, file_path: str) -> str:
+        """Get content type based on file extension."""
+        ext = Path(file_path).suffix.lower()
+        content_types = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+            '.mp4': 'video/mp4',
+            '.mov': 'video/quicktime',
+        }
+        return content_types.get(ext, 'application/octet-stream')
+
+    def post_status(self, status: str, visibility: str = "public", media_ids: Optional[List[str]] = None) -> Dict:
         """
         Post a status to Mastodon.
 
         Args:
             status: The text content to post (max 500 chars for most instances)
             visibility: Visibility level: public, unlisted, private, direct
+            media_ids: Optional list of media IDs (from upload_media) to attach to the post
 
         Returns:
             Response dictionary from Mastodon API
@@ -136,6 +359,10 @@ class MastodonClient:
             "status": status,
             "visibility": visibility
         }
+        
+        # Add media IDs if provided
+        if media_ids:
+            data["media_ids"] = media_ids
 
         try:
             response = requests.post(url, headers=headers, json=data)
@@ -277,7 +504,9 @@ class SocialMediaPostGenerator:
         api_key: Optional[str] = None,
         model: str = "openai/gpt-4o-mini",
         mastodon_token: Optional[str] = None,
-        mastodon_instance: Optional[str] = None
+        mastodon_instance: Optional[str] = None,
+        replicate_token: Optional[str] = None,
+        image_output_dir: Optional[str] = None
     ):
         """
         Initialize the post generator.
@@ -288,6 +517,8 @@ class SocialMediaPostGenerator:
                    Format: "provider/model-name" (e.g., "anthropic/claude-3-haiku")
             mastodon_token: Optional Mastodon access token for direct posting
             mastodon_instance: Optional Mastodon instance URL
+            replicate_token: Optional Replicate API token for image generation
+            image_output_dir: Optional directory to save generated images
         """
         self.api_key = api_key or os.getenv("OPEN_ROUTER_API")
         if not self.api_key:
@@ -297,6 +528,7 @@ class SocialMediaPostGenerator:
 
         self.model = model
         self.brand_context = get_full_brand_context()
+        self.image_output_dir = image_output_dir or os.getenv("IMAGE_OUTPUT_DIR", "generated_images")
 
         # Initialize Mastodon client if token provided
         self.mastodon = None
@@ -308,6 +540,17 @@ class SocialMediaPostGenerator:
                 )
             except Exception as e:
                 print(f"Warning: Mastodon client not initialized: {e}")
+        
+        # Initialize image generator if replicate token provided
+        self.image_generator = None
+        if replicate_token or os.getenv("REPLICATE_API_TOKEN"):
+            try:
+                if REPLICATE_AVAILABLE:
+                    self.image_generator = ImageGenerator(replicate_token=replicate_token)
+                else:
+                    print("Warning: Replicate package not installed. Image generation disabled.")
+            except Exception as e:
+                print(f"Warning: Image generator not initialized: {e}")
 
     def generate_post(
         self,
@@ -426,7 +669,8 @@ class SocialMediaPostGenerator:
         length: str = "medium",
         include_hashtags: bool = True,
         visibility: str = "public",
-        post_to_mastodon: bool = True
+        post_to_mastodon: bool = True,
+        include_image: bool = False
     ) -> Dict:
         """
         Generate a post and optionally post it to Mastodon.
@@ -439,9 +683,11 @@ class SocialMediaPostGenerator:
             include_hashtags: Whether to include hashtags
             visibility: Mastodon visibility (public, unlisted, private, direct)
             post_to_mastodon: Whether to actually post to Mastodon (default: True)
+            include_image: Whether to generate and attach an image (default: False)
 
         Returns:
-            Dictionary with 'post' (generated text) and 'mastodon_response' (if posted)
+            Dictionary with 'post' (generated text), 'image' (image info if generated),
+            and 'mastodon_response' (if posted)
         """
         post = self.generate_post(
             platform=platform,
@@ -452,10 +698,42 @@ class SocialMediaPostGenerator:
         )
 
         result = {"post": post}
+        media_ids = []
+
+        # Generate image if requested
+        if include_image and self.image_generator:
+            try:
+                print("Generating image for post...")
+                image_result = self.image_generator.generate_image_for_post(
+                    post_text=post,
+                    topic=topic,
+                    output_dir=self.image_output_dir
+                )
+                result["image"] = image_result
+                
+                # If posting to Mastodon, upload the image
+                if post_to_mastodon and self.mastodon and image_result.get("path"):
+                    try:
+                        media_response = self.mastodon.upload_media(
+                            file_path=image_result["path"],
+                            description=f"Generated image for: {post[:100]}"
+                        )
+                        media_ids.append(media_response.get("id"))
+                        result["image_uploaded"] = True
+                    except Exception as e:
+                        print(f"Warning: Failed to upload image to Mastodon: {e}")
+                        result["image_upload_error"] = str(e)
+            except Exception as e:
+                print(f"Warning: Failed to generate image: {e}")
+                result["image_error"] = str(e)
 
         if post_to_mastodon and self.mastodon:
             try:
-                mastodon_response = self.mastodon.post_status(post, visibility=visibility)
+                mastodon_response = self.mastodon.post_status(
+                    post,
+                    visibility=visibility,
+                    media_ids=media_ids if media_ids else None
+                )
                 result["mastodon_response"] = mastodon_response
                 result["posted"] = True
                 result["mastodon_url"] = mastodon_response.get("url", "N/A")
